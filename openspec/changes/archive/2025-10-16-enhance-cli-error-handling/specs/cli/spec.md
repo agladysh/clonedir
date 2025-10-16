@@ -1,6 +1,5 @@
-## Purpose
-Create a command-line utility that wraps the clonedir_lib Rust library to provide an easy-to-use interface for cloning directories.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: Graceful Error Handling
 The CLI SHALL handle errors gracefully, displaying user-friendly messages to stderr and exiting with appropriate codes instead of panicking. Error messages SHALL be specific, mapping library errors to clear user feedback.
 
@@ -30,25 +29,3 @@ The CLI SHALL validate input paths before attempting to clone, including write p
 #### Scenario: Permission check failure
 - **WHEN** destination parent lacks write permissions
 - **THEN** displays "Error: Permission denied for destination" and exits with code 1
-
-### Requirement: Verbose Output
-The CLI SHALL support a --verbose flag for detailed operation feedback.
-
-#### Scenario: Verbose clone
-- **WHEN** --verbose flag is used
-- **THEN** displays progress messages during cloning
-
-### Requirement: Confirmation Prompts
-The CLI SHALL prompt for confirmation before overwriting existing destinations unless --force is specified.
-
-#### Scenario: Overwrite prompt
-- **WHEN** destination exists and --force not used
-- **THEN** prompts user for confirmation
-
-### Requirement: Dry Run Mode
-The CLI SHALL support --dry-run to preview operations without executing.
-
-#### Scenario: Dry run
-- **WHEN** --dry-run flag is used
-- **THEN** displays what would be cloned without making changes
-

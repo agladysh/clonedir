@@ -7,7 +7,6 @@ use std::process;
 #[derive(Debug)]
 enum CliError {
     Io(std::io::Error),
-    Lib(Box<dyn std::error::Error>),
     SourceNotDirectory,
 }
 
@@ -15,7 +14,6 @@ impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             CliError::Io(e) => write!(f, "IO error: {}", e),
-            CliError::Lib(e) => write!(f, "Clone error: {}", e),
             CliError::SourceNotDirectory => write!(f, "Source is not a directory"),
         }
     }
@@ -71,9 +69,27 @@ fn main() {
     let to = args.to;
 
     // Validate destination
-    if to.parent().is_some_and(|p| !p.exists()) {
-        eprintln!("Error: Parent directory of destination does not exist");
-        process::exit(1);
+    if let Some(parent) = to.parent() {
+        if !parent.exists() {
+            eprintln!("Error: Parent directory of destination does not exist");
+            process::exit(1);
+        }
+        // Check write permission
+        let temp_path = parent.join(".clonedir_temp_check");
+        match std::fs::File::create(&temp_path) {
+            Ok(file) => {
+                drop(file);
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("Error: Permission denied for destination");
+                process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", CliError::Io(e));
+                process::exit(1);
+            }
+        }
     }
 
     if to.exists() && !args.force {
@@ -104,7 +120,12 @@ fn main() {
     }
 
     if let Err(e) = clonedir_lib::clonedir(&from, &to) {
-        eprintln!("Error: {}", CliError::Lib(Box::new(e)));
+        let msg = if e.kind() == std::io::ErrorKind::PermissionDenied {
+            "Error: Permission denied for destination"
+        } else {
+            &format!("Error: Clone error: {}", e)
+        };
+        eprintln!("{}", msg);
         process::exit(1);
     }
 
@@ -146,6 +167,9 @@ mod tests {
 
     #[test]
     fn test_cli_error_display() {
-        assert_eq!(format!("{}", CliError::SourceNotDirectory), "Source is not a directory");
+        assert_eq!(
+            format!("{}", CliError::SourceNotDirectory),
+            "Source is not a directory"
+        );
     }
 }
