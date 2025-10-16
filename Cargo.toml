@@ -1,0 +1,8 @@
+[package]
+name = "clonedir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clonedir_lib = "0.1"
+clap = { version = "4.0", features = ["derive"] }
