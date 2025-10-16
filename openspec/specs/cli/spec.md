@@ -32,23 +32,38 @@ The CLI SHALL validate input paths before attempting to clone, including write p
 - **THEN** displays "Error: Permission denied for destination" and exits with code 1
 
 ### Requirement: Verbose Output
-The CLI SHALL support a --verbose flag for detailed operation feedback.
+The CLI SHALL support a --verbose (-v) flag for detailed operation feedback.
 
 #### Scenario: Verbose clone
-- **WHEN** --verbose flag is used
+- **WHEN** --verbose or -v flag is used
 - **THEN** displays progress messages during cloning
 
 ### Requirement: Confirmation Prompts
-The CLI SHALL prompt for confirmation before overwriting existing destinations unless --force is specified.
+The CLI SHALL prompt for confirmation before overwriting existing destinations unless --force (-f) is specified.
 
 #### Scenario: Overwrite prompt
-- **WHEN** destination exists and --force not used
+- **WHEN** destination exists and --force/-f not used
 - **THEN** prompts user for confirmation
 
 ### Requirement: Dry Run Mode
-The CLI SHALL support --dry-run to preview operations without executing.
+The CLI SHALL support --dry-run (-n) to preview operations without executing.
 
 #### Scenario: Dry run
-- **WHEN** --dry-run flag is used
+- **WHEN** --dry-run or -n flag is used
 - **THEN** displays what would be cloned without making changes
+
+### Requirement: Quiet Mode
+The CLI SHALL support a --quiet (-q) flag to suppress non-error output to stdout.
+
+#### Scenario: Quiet dry run
+- **WHEN** --quiet or -q and --dry-run are used
+- **THEN** no output to stdout
+
+#### Scenario: Quiet with prompt
+- **WHEN** --quiet and destination exists
+- **THEN** assumes no overwrite without prompting
+
+#### Scenario: Quiet overrides verbose
+- **WHEN** --quiet and --verbose are both used
+- **THEN** suppresses verbose messages
 

@@ -30,20 +30,30 @@ impl From<std::io::Error> for CliError {
 #[derive(Parser)]
 #[command(name = "clonedir")]
 #[command(about = "Clone a directory using copy-on-write where possible")]
+#[command(long_about = "Clone a directory using copy-on-write where possible.
+
+Examples:
+  clonedir /src /dst
+  clonedir -v /src /dst
+  clonedir -n /src /dst  # Dry run
+  clonedir -f /src /dst  # Force overwrite")]
 struct Args {
     /// Source directory to clone
     from: PathBuf,
     /// Destination directory
     to: PathBuf,
     /// Enable verbose output
-    #[arg(long)]
+    #[arg(short = 'v', long)]
     verbose: bool,
     /// Perform a dry run without making changes
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     dry_run: bool,
     /// Force overwrite without confirmation
-    #[arg(long)]
+    #[arg(short = 'f', long)]
     force: bool,
+    /// Suppress non-error output
+    #[arg(short = 'q', long)]
+    quiet: bool,
 }
 
 fn main() {
@@ -93,29 +103,38 @@ fn main() {
     }
 
     if to.exists() && !args.force {
-        print!(
-            "Destination {} already exists. Overwrite? (y/N): ",
-            to.display()
-        );
-        io::stdout().flush().unwrap();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted.");
+        if args.quiet {
+            // Assume no in quiet mode
             return;
+        } else {
+            print!(
+                "Destination {} already exists. Overwrite? (y/N): ",
+                to.display()
+            );
+            io::stdout().flush().unwrap();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).unwrap();
+            if !input.trim().eq_ignore_ascii_case("y") {
+                if !args.quiet {
+                    println!("Aborted.");
+                }
+                return;
+            }
         }
     }
 
     if args.dry_run {
-        println!(
-            "Dry run: Would clone {} to {}",
-            from.display(),
-            to.display()
-        );
+        if !args.quiet {
+            println!(
+                "Dry run: Would clone {} to {}",
+                from.display(),
+                to.display()
+            );
+        }
         return;
     }
 
-    if args.verbose {
+    if args.verbose && !args.quiet {
         println!("Cloning {} to {}", from.display(), to.display());
     }
 
@@ -129,7 +148,7 @@ fn main() {
         process::exit(1);
     }
 
-    if args.verbose {
+    if args.verbose && !args.quiet {
         println!("Clone completed successfully");
     }
 }
@@ -147,6 +166,7 @@ mod tests {
         assert!(!args.verbose);
         assert!(!args.dry_run);
         assert!(!args.force);
+        assert!(!args.quiet);
     }
 
     #[test]
@@ -163,6 +183,16 @@ mod tests {
         assert!(args.verbose);
         assert!(args.dry_run);
         assert!(args.force);
+    }
+
+    #[test]
+    fn test_parse_with_shorts() {
+        let args =
+            Args::try_parse_from(["clonedir", "/src", "/dst", "-v", "-n", "-f", "-q"]).unwrap();
+        assert!(args.verbose);
+        assert!(args.dry_run);
+        assert!(args.force);
+        assert!(args.quiet);
     }
 
     #[test]
