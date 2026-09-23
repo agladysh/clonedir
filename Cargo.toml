@@ -1,8 +1,17 @@
 [package]
 name = "clonedir"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Clone a directory tree with copy-on-write: explicit fallback, atomic publication, own cleanup"
+license = "MIT"
 
+# No dependencies: the platform calls are declared in src/sys.rs.
 [dependencies]
-clonedir_lib = "0.1"
-clap = { version = "4.0", features = ["derive"] }
+
+[lib]
+name = "clonedir"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clonedir"
+path = "src/main.rs"
