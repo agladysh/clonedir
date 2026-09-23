@@ -91,8 +91,13 @@ fn dry_run_creates_nothing_and_writes_no_probe() {
 /// Start a run that stalls after `after` entries, and wait until its stage
 /// holds a partial tree.
 fn stalled_run(s: &Scratch, src: &Path, after: u64) -> std::process::Child {
+    stalled_run_with(s, src, after, &[])
+}
+
+fn stalled_run_with(s: &Scratch, src: &Path, after: u64, flags: &[&str]) -> std::process::Child {
     let mut child = Command::new(BIN)
         .args(["--min-free", "0"])
+        .args(flags)
         .arg(src)
         .arg(s.path("dst"))
         .env("CLONEDIR_TEST_STALL_AFTER", after.to_string())
@@ -244,4 +249,35 @@ fn a_kept_failed_stage_survives_the_retry_and_sweep() {
     );
     assert_eq!(run(&[&s.0], &["--sweep", "--json"]).status.code(), Some(0));
     assert_eq!(stages(&s.0), kept, "kept for inspection, as asked");
+}
+
+#[test]
+fn a_kept_stage_survives_a_sigkill_of_its_run_and_later_clones() {
+    // SIGKILL never reaches the failure path, so the request to keep the
+    // stage has to be on disk before anything is copied.
+    let s = Scratch::new("cli-keep-kill");
+    let src = small_tree(&s);
+    let mut child = stalled_run_with(&s, &src, 5, &["--keep-failed"]);
+    signal(child.id(), 9);
+    child.wait().unwrap();
+    let kept = stages(&s.0);
+    assert_eq!(kept.len(), 1, "SIGKILL cannot clean up");
+    let partial = listing(&kept[0].join("tree"));
+    assert!(!partial.is_empty());
+
+    write(&src.join("d0/f0"), b"the source moved on");
+    let retry = run(&[&src, &s.path("dst")], &["--json", "--min-free", "0"]);
+    assert_eq!(retry.status.code(), Some(0), "{}", stdout(&retry));
+    assert!(
+        stdout(&retry).contains("\"swept_stages\":[]"),
+        "{}",
+        stdout(&retry)
+    );
+    assert_eq!(run(&[&s.0], &["--sweep", "--json"]).status.code(), Some(0));
+    assert_eq!(stages(&s.0), kept, "kept, as asked");
+    assert_eq!(
+        listing(&kept[0].join("tree")),
+        partial,
+        "partial copy intact"
+    );
 }

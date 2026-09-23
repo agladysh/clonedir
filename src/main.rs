@@ -25,7 +25,7 @@ Options:
       --json           Print a JSON receipt (or error) on stdout
       --allow-copy     Copy bytes where cloning is impossible (another volume or filesystem)
       --min-free SIZE  Refuse to proceed below SIZE available (default 256M; K/M/G suffixes)
-      --keep-failed    Keep a failed stage for inspection instead of removing it
+      --keep-failed    Keep a failed or killed run's stage for inspection instead of removing it
       --sweep          Remove stages left in PARENT by clonedir processes that are gone
       --measure        Report files, logical, du-allocated and private (unshared) bytes
   -h, --help           Show this help

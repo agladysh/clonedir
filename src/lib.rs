@@ -47,8 +47,11 @@
 //! - **Own cleanup.** On failure or cancellation the stage is removed. A stage
 //!   left by a killed process names its owner pid, and [`sweep_stale_stages`]
 //!   (run automatically before each clone into the same parent) removes it once
-//!   that process is gone. A stage kept with `keep_failed_stage` is never
-//!   swept. Stages are ignored by Git. Nobody writes into a stage but
+//!   that process is gone. With `keep_failed_stage` the stage is marked when it
+//!   is created, before any copy, so it outlives a failure, a signal or a
+//!   SIGKILL of that run alike, and no sweep takes it while it still holds its
+//!   partial tree. What it keeps is the unverified part copied before the run
+//!   stopped, not a snapshot. Stages are ignored by Git. Nobody writes into a stage but
 //!   clonedir, and nothing was published from it, but it can hold the only
 //!   remaining copy of source contents that changed or were deleted since;
 //!   clonedir treats that as its own disposable output. Pids are only
@@ -80,8 +83,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const STAGE_PREFIX: &str = ".clonedir-stage.";
 const OWNER_FILE: &str = "owner";
 const OWNER_MAGIC: &str = "clonedir-stage v1";
-/// Present in a stage kept on request; the sweep leaves such a stage alone.
+/// Written at creation into the stage of a run asked to keep a failed stage,
+/// so the request survives even a SIGKILL of that run. The sweep leaves such
+/// a stage alone while it holds a tree.
 const KEPT_FILE: &str = "kept";
+const TREE_DIR: &str = "tree";
 const SPACE_CHECK_EVERY: u64 = 256;
 
 /// What to do when source and destination cannot share extents.
@@ -101,7 +107,9 @@ pub struct Options<'a> {
     pub cancel: Option<&'a AtomicBool>,
     /// Called with the running entry count after each entry is materialized.
     pub on_entry: Option<&'a (dyn Fn(u64) + Sync)>,
-    /// Leave a failed stage in place (for diagnosis) instead of removing it.
+    /// Leave a failed stage in place (for diagnosis) instead of removing it,
+    /// including when the process is killed. A successful clone still removes
+    /// its stage.
     pub keep_failed_stage: bool,
 }
 
@@ -356,8 +364,8 @@ pub fn clone_tree(source: &Path, destination: &Path, options: &Options) -> Resul
     // Housekeeping only: a stage that cannot be removed must not stop this clone.
     let swept = sweep_stale_stages(&parent).unwrap_or_default();
 
-    let stage = create_stage(&parent, &name)?;
-    let tree = stage.join("tree");
+    let stage = create_stage(&parent, &name, options.keep_failed_stage)?;
+    let tree = stage.join(TREE_DIR);
     let mut walk = Walk {
         options,
         root_dev: fs::symlink_metadata(&plan.source)
@@ -417,8 +425,7 @@ pub fn clone_tree(source: &Path, destination: &Path, options: &Options) -> Resul
         }
         Err(mut error) => {
             if options.keep_failed_stage {
-                // Kept on request, so no later sweep may take it.
-                let _ = fs::File::create(stage.join(KEPT_FILE));
+                // Marked kept since creation, so no later sweep takes it.
                 error.kept_stage = Some(stage);
             } else if let Err(e) = remove_tree(&stage) {
                 error.detail =
@@ -672,7 +679,7 @@ fn copy_file(src: &Path, dst: &Path, meta: &Metadata) -> io::Result<()> {
 
 static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn create_stage(parent: &Path, name: &OsStr) -> Result<PathBuf> {
+fn create_stage(parent: &Path, name: &OsStr, keep: bool) -> Result<PathBuf> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO);
@@ -701,7 +708,16 @@ fn create_stage(parent: &Path, name: &OsStr) -> Result<PathBuf> {
         .create_new(true)
         .open(stage.join(OWNER_FILE))
         .and_then(|mut f| f.write_all(owner.as_bytes()))
-        .and_then(|()| fs::write(stage.join(".gitignore"), "*\n"));
+        .and_then(|()| fs::write(stage.join(".gitignore"), "*\n"))
+        // Before any tree exists, so a kill at any later point finds it marked.
+        // If it cannot be written the clone fails rather than run unkept.
+        .and_then(|()| {
+            if keep {
+                fs::write(stage.join(KEPT_FILE), "")
+            } else {
+                Ok(())
+            }
+        });
     if let Err(e) = write {
         let _ = remove_tree(&stage);
         return Err(Error::io(&stage, e));
@@ -725,8 +741,10 @@ fn stage_owner(stage: &Path) -> Option<u32> {
 /// Only directories named with [`STAGE_PREFIX`], owned by the current user and
 /// holding a clonedir owner record whose pid is not alive are removed. A stage
 /// without a readable owner record, whose pid is alive (even if reused), or
-/// kept on request (`keep_failed_stage`) is left alone, and so is one that
-/// cannot be removed (it is retried next time). Concurrent sweeps of one parent
+/// kept on request (`keep_failed_stage`) and still holding its tree is left
+/// alone, and so is one that cannot be removed (it is retried next time). A
+/// kept stage without a tree (killed after publishing, or before copying)
+/// holds nothing to keep and is swept like any other. Concurrent sweeps of one parent
 /// are safe.
 pub fn sweep_stale_stages(parent: &Path) -> io::Result<Vec<PathBuf>> {
     let me = sys::current_uid();
@@ -747,7 +765,7 @@ pub fn sweep_stale_stages(parent: &Path) -> io::Result<Vec<PathBuf>> {
         if !meta.is_dir() || meta.uid() != me {
             continue;
         }
-        if path.join(KEPT_FILE).exists() {
+        if path.join(KEPT_FILE).exists() && fs::symlink_metadata(path.join(TREE_DIR)).is_ok() {
             continue;
         }
         if stage_owner(&path).is_some_and(|pid| !sys::process_alive(pid))

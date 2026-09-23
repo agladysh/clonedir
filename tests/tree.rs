@@ -558,6 +558,37 @@ fn a_stage_is_ignored_by_git_in_an_enclosing_worktree() {
     );
 }
 
+#[test]
+fn keep_failed_stage_changes_nothing_on_success() {
+    let s = Scratch::new("keep-ok");
+    let src = fixture(&s);
+    let options = Options {
+        keep_failed_stage: true,
+        ..opts()
+    };
+    clone_tree(&src, &s.path("dst"), &options).unwrap();
+    assert_eq!(listing(&src), listing(&s.path("dst")));
+    assert!(
+        stages(&s.0).is_empty(),
+        "a successful clone removes a marked stage"
+    );
+}
+
+#[test]
+fn a_kept_stage_is_swept_only_once_it_holds_no_tree() {
+    let s = Scratch::new("keep-sweep");
+    let kept = stale_stage(&s);
+    fs::write(kept.join("kept"), "").unwrap();
+    assert!(
+        sweep_stale_stages(&s.0).unwrap().is_empty(),
+        "partial tree kept"
+    );
+    assert!(kept.join("tree/d0/f0").exists());
+    // Killed after publication (or before copying): nothing left to keep.
+    common::force_remove(&kept.join("tree"));
+    assert_eq!(sweep_stale_stages(&s.0).unwrap(), vec![kept]);
+}
+
 // ------------------------------------------------------ physical allocation
 
 #[cfg(target_os = "macos")]

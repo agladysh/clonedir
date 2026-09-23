@@ -29,8 +29,11 @@ the copy costs metadata but no data blocks until one side is written.
   intermediate state.
 - **Cleans up after itself.** Failures, SIGINT and SIGTERM remove the stage. A stage left by a
   killed run records its pid. `clonedir --sweep PARENT`, or the next clone into that parent,
-  removes it once that process is gone. A stage kept with `--keep-failed` is never swept; remove it
-  yourself. Stages carry a `.gitignore`, so a stage inside a worktree stays out of `git status`.
+  removes it once that process is gone. With `--keep-failed` the stage is marked when it is created,
+  so it survives a failure, a signal or a SIGKILL of that run, and no sweep removes it while it
+  holds its partial tree; remove it yourself. It holds only what was copied before the run
+  stopped, unverified, so it is for diagnosis, not a way to preserve the source: to keep old source
+  content, make a clone that succeeds before changing the source. Stages carry a `.gitignore`, so a stage inside a worktree stays out of `git status`.
   A swept stage held only copies of the source, but once the source has changed or been deleted
   they may be the last copies of that earlier content.
 - **Checked, not reserved, space.** It refuses to start below `--min-free` available space (default
@@ -59,7 +62,7 @@ clonedir --measure [--json] PATH...
       --json           Print a JSON receipt (or error) on stdout
       --allow-copy     Copy bytes where cloning is impossible
       --min-free SIZE  Refuse to proceed below SIZE available (default 256M; K/M/G suffixes)
-      --keep-failed    Keep a failed stage for inspection instead of removing it
+      --keep-failed    Keep a failed or killed run's stage for inspection instead of removing it
 ```
 
 Exit status: 0 success, 1 error, 2 usage, 3 source changed, 4 cannot clone without

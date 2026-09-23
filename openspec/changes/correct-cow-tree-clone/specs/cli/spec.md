@@ -68,8 +68,12 @@ The CLI SHALL remove its stage on failure and on SIGINT or SIGTERM, including st
 - **THEN** sweeping leaves it in place
 
 #### Scenario: Kept stage
-- **WHEN** a failed run was given `--keep-failed` and a later clone into the same parent, or `--sweep`, runs
-- **THEN** the kept stage remains
+- **WHEN** a run given `--keep-failed` fails, is interrupted or is killed with SIGKILL, and a later clone into the same parent, or `--sweep`, runs
+- **THEN** its stage and partial tree remain
+
+#### Scenario: Kept stage not needed
+- **WHEN** a run given `--keep-failed` succeeds
+- **THEN** no stage remains
 
 #### Scenario: Concurrent sweeps
 - **WHEN** several clones into one parent start while it holds a dead run's stage
