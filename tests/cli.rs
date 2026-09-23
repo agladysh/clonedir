@@ -213,3 +213,35 @@ fn measure_reports_du_and_private_bytes_separately() {
         "a fresh clone owns nothing: {out}"
     );
 }
+
+#[test]
+fn a_kept_failed_stage_survives_the_retry_and_sweep() {
+    let s = Scratch::new("cli-keep");
+    let src = small_tree(&s);
+    let fifo = src.join("zz-fifo");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let failed = run(
+        &[&src, &s.path("dst")],
+        &["--json", "--keep-failed", "--min-free", "0"],
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let kept = stages(&s.0);
+    assert_eq!(kept.len(), 1, "{}", stdout(&failed));
+
+    fs::remove_file(&fifo).unwrap();
+    let retry = run(&[&src, &s.path("dst")], &["--json", "--min-free", "0"]);
+    assert_eq!(retry.status.code(), Some(0), "{}", stdout(&retry));
+    assert!(
+        stdout(&retry).contains("\"swept_stages\":[]"),
+        "{}",
+        stdout(&retry)
+    );
+    assert_eq!(run(&[&s.0], &["--sweep", "--json"]).status.code(), Some(0));
+    assert_eq!(stages(&s.0), kept, "kept for inspection, as asked");
+}

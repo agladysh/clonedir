@@ -33,6 +33,10 @@ The CLI SHALL materialize regular files by sharing extents with the source. Wher
 ### Requirement: Atomic Publication
 The CLI SHALL build the copy in a private stage beside the destination and publish it with an exclusive rename. It SHALL never overwrite or merge into an existing destination.
 
+#### Scenario: Read-only source root
+- **WHEN** the source directory itself is read-only
+- **THEN** the clone is published with the source's mode
+
 #### Scenario: Destination exists
 - **WHEN** the destination exists as a file, directory or symbolic link
 - **THEN** the CLI exits 6 and the existing entry is unchanged
@@ -42,7 +46,7 @@ The CLI SHALL build the copy in a private stage beside the destination and publi
 - **THEN** exactly one succeeds, the others exit 6, and the published tree is complete
 
 ### Requirement: Source Consistency
-The CLI SHALL re-examine every copied source entry after copying. If any entry changed, it SHALL discard the copy and exit 3.
+The CLI SHALL re-examine every copied source entry after copying. If any entry changed, it SHALL discard the copy and exit 3. This establishes a filesystem-level instant as far as inode, size, mode, mtime and ctime show; it does not establish application-level consistency.
 
 #### Scenario: Concurrent writer
 - **WHEN** a source file is rewritten, or an entry added, after it was cloned but before the clone completes
@@ -62,6 +66,22 @@ The CLI SHALL remove its stage on failure and on SIGINT or SIGTERM, including st
 #### Scenario: Live owner
 - **WHEN** a stage's owner pid is running
 - **THEN** sweeping leaves it in place
+
+#### Scenario: Kept stage
+- **WHEN** a failed run was given `--keep-failed` and a later clone into the same parent, or `--sweep`, runs
+- **THEN** the kept stage remains
+
+#### Scenario: Concurrent sweeps
+- **WHEN** several clones into one parent start while it holds a dead run's stage
+- **THEN** all of them succeed and the stage is removed
+
+#### Scenario: Unremovable stale stage
+- **WHEN** a dead run's stage cannot be removed
+- **THEN** a clone into the same parent still succeeds and the stage is left for a later sweep
+
+#### Scenario: Stage inside a Git worktree
+- **WHEN** a stage exists inside a Git worktree
+- **THEN** `git status` does not list it
 
 ### Requirement: Space Bound
 The CLI SHALL refuse to start, and stop, when available space on the destination filesystem is below `--min-free` (default 256 MiB), plus the bytes about to be copied when copying. It SHALL exit 5 and remove its stage.
@@ -102,7 +122,7 @@ The CLI SHALL validate its inputs before creating anything. The source must exis
 - **THEN** verifies it exists and is a directory
 
 #### Scenario: Destination inside source
-- **WHEN** the destination lies inside the source
+- **WHEN** the destination lies inside the source, including through an aliased path such as an APFS firmlink
 - **THEN** the CLI exits 1 without creating anything
 
 ### Requirement: Dry Run Mode

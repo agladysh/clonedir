@@ -8,21 +8,34 @@ the copy costs metadata but no data blocks until one side is written.
 
 ## Semantics
 
-- **Faithful.** Directories, files and symlinks keep their relative paths, modes and modification
-  times. Symlinks are recreated verbatim and never followed. Hard-linked files become independent
-  files. FIFOs, sockets, devices and nested mount points are refused.
+- **Faithful.** Directories and files keep their relative paths, modes and modification times.
+  Symlinks keep their targets verbatim and are never followed; their own times are not kept, and
+  an absolute link into the source still points into the source. Hard-linked files become
+  independent files. On macOS a cloned file also keeps its extended attributes, ACL and flags;
+  byte copies, directories and the Linux path keep mode and times only. FIFOs, sockets, devices
+  and nested mount points (on Linux also btrfs subvolumes) are refused.
 - **No silent copies.** When cloning is impossible (another volume, a filesystem without clones)
   the command fails with exit status 4. `--allow-copy` permits byte copying, and the receipt counts
   the bytes.
 - **Never overwrites.** The destination must not exist. The copy is built in a private stage beside
   it and published by an exclusive rename, so the destination appears only complete, and only one
   of several racing clones can win.
-- **Consistent or refused.** If the source changes while it is being cloned, the copy is discarded
-  (exit 3). Stop its writers and retry.
+- **Consistent or refused.** If any source entry's inode, size, mode, mtime or ctime changed while
+  the tree was being cloned, the copy is discarded (exit 3); stop its writers and retry. A copy
+  that passes is the tree as it stood at one instant, as far as that metadata shows: writes
+  through shared memory maps, and same-size rewrites within one timestamp tick on filesystems
+  with coarse timestamps, can go unseen. It is not an application-consistent snapshot: a writer
+  paused midway through a multi-file update for the whole run yields a successful copy of that
+  intermediate state.
 - **Cleans up after itself.** Failures, SIGINT and SIGTERM remove the stage. A stage left by a
   killed run records its pid. `clonedir --sweep PARENT`, or the next clone into that parent,
-  removes it once that process is gone.
-- **Bounded.** It refuses to proceed below `--min-free` available space (default 256 MiB).
+  removes it once that process is gone. A stage kept with `--keep-failed` is never swept; remove it
+  yourself. Stages carry a `.gitignore`, so a stage inside a worktree stays out of `git status`.
+  A swept stage held only copies of the source, but once the source has changed or been deleted
+  they may be the last copies of that earlier content.
+- **Checked, not reserved, space.** It refuses to start below `--min-free` available space (default
+  256 MiB), rechecks during the run, and before each byte copy requires room for that file above
+  the floor. Concurrent writers can still take the space between a check and a write.
 
 ## What copy-on-write does not do
 

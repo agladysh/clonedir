@@ -18,7 +18,7 @@
 
 ## 4. Code Quality
 - [x] 4.1 rustfmt and clippy clean
-- [x] 4.2 `cargo test` passes (29 tests, macOS APFS)
+- [x] 4.2 `cargo test` passes (35 tests, macOS APFS)
 
 ## 5. Validate and Archive
 - [ ] 5.1 `openspec validate correct-cow-tree-clone --strict` (openspec CLI not installed where this was prepared)

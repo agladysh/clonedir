@@ -5,31 +5,55 @@
 //! `FICLONE`). The contract, which the tests exercise:
 //!
 //! - **Structure.** Directories, regular files and symlinks are reproduced at
-//!   their own paths. Symlinks are recreated verbatim and never followed.
-//!   File modes and modification times are kept; directory modes and times are
-//!   applied after their contents. Ownership is not copied. FIFOs, sockets and
-//!   devices, and mount points inside the source, are refused.
+//!   their own paths. Symlinks are recreated verbatim and never followed; their
+//!   own times are not kept. File modes and modification times are kept;
+//!   directory modes and times are applied after their contents. Ownership is
+//!   not copied. On macOS `clonefile` also carries a file's extended
+//!   attributes, ACL and flags (including `uchg`); the Linux path, byte copies
+//!   and directories carry mode and times only. FIFOs, sockets and devices,
+//!   and entries on another device (mount points, and on Linux btrfs
+//!   subvolumes), are refused. Bind mounts of the same filesystem are not
+//!   detected.
 //! - **Independence.** Every destination file is its own inode. Writes on
 //!   either side never reach the other; source hard links become separate
-//!   files in the destination.
+//!   files in the destination. A symlink is copied verbatim, so an absolute
+//!   link into the source still points into the source.
 //! - **No silent byte copies.** When the two sides cannot share extents
 //!   (another volume, a filesystem without cloning) the operation fails
 //!   unless [`Fallback::Copy`] was asked for, and the receipt counts every
 //!   byte copied.
-//! - **Bounded space.** It refuses to start, and stops, when available space
-//!   would fall below `min_free_bytes`.
+//! - **Checked space, not reserved.** It refuses to start below
+//!   `min_free_bytes`, rechecks every few hundred entries, and before each
+//!   byte copy requires room for that file above the floor. Other writers on
+//!   the volume, including concurrent clones, can still take the space between
+//!   a check and the write; an `ENOSPC` then fails the clone and frees its stage.
+//!   Nothing bounds later growth when either side is written.
 //! - **Atomic publication.** Work happens in a private stage beside the
 //!   destination, which appears only complete, by an exclusive rename. An
-//!   existing destination is never replaced or merged into.
-//! - **Consistent or refused.** Source entries are re-examined after copying.
-//!   If any changed meanwhile, the copy is discarded and
-//!   [`ErrorKind::SourceChanged`] returned, so an active writer cannot yield a
-//!   torn tree that looks successful.
+//!   existing destination is never replaced or merged into. Publication is not
+//!   made durable with `fsync`.
+//! - **Consistent or refused.** Every source entry's inode, size, mode, mtime
+//!   and ctime are recorded before it is copied and re-examined after the
+//!   whole walk; any difference discards the copy with
+//!   [`ErrorKind::SourceChanged`]. When the check passes, each entry was
+//!   unchanged from before it was copied until after the last one was, so the
+//!   copy is the tree as it stood at one instant, provided every change moved
+//!   that metadata. `write(2)`, `rename(2)` and `chmod(2)` do; writes through
+//!   an already-dirty shared memory map may not, and same-size rewrites within
+//!   one timestamp tick are invisible on filesystems with coarse timestamps.
+//!   It is a filesystem-level instant, not an application-level one: a writer
+//!   that pauses between two related writes for the whole walk yields a
+//!   successful copy of its intermediate state.
 //! - **Own cleanup.** On failure or cancellation the stage is removed. A stage
 //!   left by a killed process names its owner pid, and [`sweep_stale_stages`]
 //!   (run automatically before each clone into the same parent) removes it once
-//!   that process is gone. A stage never contains unique work, only clones or
-//!   copies of the source.
+//!   that process is gone. A stage kept with `keep_failed_stage` is never
+//!   swept. Stages are ignored by Git. Nobody writes into a stage but
+//!   clonedir, and nothing was published from it, but it can hold the only
+//!   remaining copy of source contents that changed or were deleted since;
+//!   clonedir treats that as its own disposable output. Pids are only
+//!   meaningful on one host, so a parent shared between hosts or pid
+//!   namespaces must not hold concurrent clones.
 //!
 //! What cloning does *not* do: extents are shared only between the files it
 //! clones. It does not deduplicate independently written data (for example
@@ -56,6 +80,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const STAGE_PREFIX: &str = ".clonedir-stage.";
 const OWNER_FILE: &str = "owner";
 const OWNER_MAGIC: &str = "clonedir-stage v1";
+/// Present in a stage kept on request; the sweep leaves such a stage alone.
+const KEPT_FILE: &str = "kept";
 const SPACE_CHECK_EVERY: u64 = 256;
 
 /// What to do when source and destination cannot share extents.
@@ -270,7 +296,14 @@ pub fn plan(source: &Path, destination: &Path, options: &Options) -> Result<Plan
             "destination exists; clonedir never overwrites or merges into it",
         ));
     }
-    if destination.starts_with(&source) {
+    // A path prefix misses aliases such as APFS firmlinks
+    // (/System/Volumes/Data/...), so compare identities as well.
+    let source_id = (source_meta.dev(), source_meta.ino());
+    let nested = destination.starts_with(&source)
+        || parent
+            .ancestors()
+            .any(|a| fs::metadata(a).is_ok_and(|m| (m.dev(), m.ino()) == source_id));
+    if nested {
         return Err(Error::new(
             ErrorKind::Nested,
             Some(&destination),
@@ -320,7 +353,8 @@ pub fn clone_tree(source: &Path, destination: &Path, options: &Options) -> Resul
         .file_name()
         .expect("resolved destination has a name")
         .to_os_string();
-    let swept = sweep_stale_stages(&parent).map_err(|e| Error::io(&parent, e))?;
+    // Housekeeping only: a stage that cannot be removed must not stop this clone.
+    let swept = sweep_stale_stages(&parent).unwrap_or_default();
 
     let stage = create_stage(&parent, &name)?;
     let tree = stage.join("tree");
@@ -348,8 +382,16 @@ pub fn clone_tree(source: &Path, destination: &Path, options: &Options) -> Resul
             fs::symlink_metadata(&plan.source).map_err(|e| Error::io(&plan.source, e))?;
         walk.directory(&plan.source, &tree, &root_meta)?;
         walk.verify_unchanged()?;
+        // Moving a directory to another parent needs write permission on it
+        // (for its ".."), so a read-only root gets its own mode once published.
+        let root_mode = root_meta.mode() & 0o7777;
+        if root_mode & 0o700 != 0o700 {
+            fs::set_permissions(&tree, fs::Permissions::from_mode(root_mode | 0o700))
+                .map_err(|e| Error::io(&tree, e))?;
+        }
         match sys::rename_noreplace(&tree, &plan.destination) {
-            Ok(()) => Ok(()),
+            Ok(()) => fs::set_permissions(&plan.destination, fs::Permissions::from_mode(root_mode))
+                .map_err(|e| Error::io(&plan.destination, e)),
             Err(e)
                 if e.kind() == io::ErrorKind::AlreadyExists
                     || e.raw_os_error() == Some(66 /* ENOTEMPTY */) =>
@@ -375,6 +417,8 @@ pub fn clone_tree(source: &Path, destination: &Path, options: &Options) -> Resul
         }
         Err(mut error) => {
             if options.keep_failed_stage {
+                // Kept on request, so no later sweep may take it.
+                let _ = fs::File::create(stage.join(KEPT_FILE));
                 error.kept_stage = Some(stage);
             } else if let Err(e) = remove_tree(&stage) {
                 error.detail =
@@ -648,11 +692,16 @@ fn create_stage(parent: &Path, name: &OsStr) -> Result<PathBuf> {
         nanos.as_secs(),
         name.to_string_lossy()
     );
+    // The .gitignore keeps the stage out of `git status` and `git add` when the
+    // parent is inside a worktree: its paths do not match the ignore rules of
+    // the destination (for example `/node_modules/`), and a killed run's stage
+    // stays until the next clone into this parent.
     let write = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(stage.join(OWNER_FILE))
-        .and_then(|mut f| f.write_all(owner.as_bytes()));
+        .and_then(|mut f| f.write_all(owner.as_bytes()))
+        .and_then(|()| fs::write(stage.join(".gitignore"), "*\n"));
     if let Err(e) = write {
         let _ = remove_tree(&stage);
         return Err(Error::io(&stage, e));
@@ -675,8 +724,10 @@ fn stage_owner(stage: &Path) -> Option<u32> {
 ///
 /// Only directories named with [`STAGE_PREFIX`], owned by the current user and
 /// holding a clonedir owner record whose pid is not alive are removed. A stage
-/// without a readable owner record, or whose pid is alive (even if reused), is
-/// left alone.
+/// without a readable owner record, whose pid is alive (even if reused), or
+/// kept on request (`keep_failed_stage`) is left alone, and so is one that
+/// cannot be removed (it is retried next time). Concurrent sweeps of one parent
+/// are safe.
 pub fn sweep_stale_stages(parent: &Path) -> io::Result<Vec<PathBuf>> {
     let me = sys::current_uid();
     let mut removed = Vec::new();
@@ -696,12 +747,13 @@ pub fn sweep_stale_stages(parent: &Path) -> io::Result<Vec<PathBuf>> {
         if !meta.is_dir() || meta.uid() != me {
             continue;
         }
-        match stage_owner(&path) {
-            Some(pid) if !sys::process_alive(pid) => {
-                remove_tree(&path)?;
-                removed.push(path);
-            }
-            _ => {}
+        if path.join(KEPT_FILE).exists() {
+            continue;
+        }
+        if stage_owner(&path).is_some_and(|pid| !sys::process_alive(pid))
+            && remove_tree(&path).is_ok()
+        {
+            removed.push(path);
         }
     }
     Ok(removed)
@@ -709,25 +761,37 @@ pub fn sweep_stale_stages(parent: &Path) -> io::Result<Vec<PathBuf>> {
 
 /// Remove a tree without following links, restoring owner access to
 /// directories first so read-only copies (for example module caches) go too.
+/// Entries that vanish meanwhile (another sweep of the same stage) count as
+/// removed.
 fn remove_tree(path: &Path) -> io::Result<()> {
-    let meta = match fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+    fn gone<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    let Some(meta) = gone(fs::symlink_metadata(path))? else {
+        return Ok(());
     };
     if !meta.is_dir() {
-        return fs::remove_file(path);
+        return gone(fs::remove_file(path)).map(drop);
     }
     if meta.mode() & 0o700 != 0o700 {
-        fs::set_permissions(
+        gone(fs::set_permissions(
             path,
             fs::Permissions::from_mode((meta.mode() & 0o7777) | 0o700),
-        )?;
+        ))?;
     }
-    for entry in fs::read_dir(path)? {
-        remove_tree(&entry?.path())?;
+    let Some(entries) = gone(fs::read_dir(path))? else {
+        return Ok(());
+    };
+    for entry in entries {
+        if let Some(entry) = gone(entry)? {
+            remove_tree(&entry.path())?;
+        }
     }
-    fs::remove_dir(path)
+    gone(fs::remove_dir(path)).map(drop)
 }
 
 // ------------------------------------------------------------- measurement

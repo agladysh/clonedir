@@ -415,6 +415,149 @@ fn stale_stages_are_swept_only_when_their_owner_is_gone() {
     );
 }
 
+#[test]
+fn a_read_only_source_root_is_published_with_its_mode() {
+    let s = Scratch::new("ro-root");
+    let src = s.path("src");
+    write(&src.join("sub/f"), b"f");
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = clone_tree(&src, &s.path("dst"), &opts());
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
+    result.unwrap();
+    let dst = fs::symlink_metadata(s.path("dst")).unwrap();
+    assert_eq!(dst.mode() & 0o7777, 0o555);
+    assert_eq!(fs::read(s.path("dst/sub/f")).unwrap(), b"f");
+    assert!(stages(&s.0).is_empty());
+    fs::set_permissions(s.path("dst"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_destination_inside_the_source_through_a_firmlink_alias_is_refused() {
+    let s = Scratch::new("alias");
+    let src = fixture(&s);
+    let alias = std::path::Path::new("/System/Volumes/Data").join(src.strip_prefix("/").unwrap());
+    if !alias.is_dir() {
+        return; // not on a firmlinked data volume
+    }
+    let error = clone_tree(&src, &alias.join("a/inner"), &opts()).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Nested);
+    assert!(stages(&src.join("a")).is_empty(), "nothing was created");
+}
+
+/// A dead run's stage with enough entries that concurrent sweeps overlap.
+fn stale_stage(s: &Scratch) -> std::path::PathBuf {
+    let dir = s.path(&format!("{}stale", clonedir::STAGE_PREFIX));
+    for d in 0..20 {
+        for f in 0..40 {
+            write(&dir.join(format!("tree/d{d}/f{f}")), b"");
+        }
+    }
+    fs::write(
+        dir.join("owner"),
+        format!("clonedir-stage v1\npid={}\n", dead_pid()),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn concurrent_clones_sweeping_one_stale_stage_all_succeed() {
+    let s = Scratch::new("sweep-race");
+    let src = fixture(&s);
+    for round in 0..5 {
+        let stale = stale_stage(&s);
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let (src, dst, barrier) = (
+                    src.clone(),
+                    s.path(&format!("dst{round}-{i}")),
+                    barrier.clone(),
+                );
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    clone_tree(&src, &dst, &opts()).map(|_| ())
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join()
+                .unwrap()
+                .expect("a concurrent sweep must not fail the clone");
+        }
+        assert!(!stale.exists());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stale_stage_that_cannot_be_removed_does_not_block_clones() {
+    let s = Scratch::new("sweep-stuck");
+    let src = fixture(&s);
+    let stale = stale_stage(&s);
+    let stuck = stale.join("tree/d0/f0");
+    let chflags = |flag: &str| {
+        assert!(
+            std::process::Command::new("chflags")
+                .arg(flag)
+                .arg(&stuck)
+                .status()
+                .unwrap()
+                .success()
+        )
+    };
+    chflags("uchg");
+    let receipt = clone_tree(&src, &s.path("dst"), &opts());
+    chflags("nouchg");
+    assert!(receipt.unwrap().swept_stages.is_empty());
+    assert_eq!(listing(&src), listing(&s.path("dst")));
+    assert_eq!(
+        sweep_stale_stages(&s.0).unwrap(),
+        vec![stale],
+        "retried once removable"
+    );
+}
+
+#[test]
+fn a_stage_is_ignored_by_git_in_an_enclosing_worktree() {
+    let s = Scratch::new("git");
+    let src = fixture(&s);
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&s.0)
+            .args(args)
+            .output()
+    };
+    match git(&["init", "-q"]) {
+        Ok(o) if o.status.success() => {}
+        _ => return, // no usable git here
+    }
+    let untracked = std::sync::Mutex::new(None);
+    let hook = |_: u64| {
+        let mut seen = untracked.lock().unwrap();
+        if seen.is_none() {
+            let out = git(&["status", "--porcelain", "--untracked-files=all"]).unwrap();
+            *seen = Some(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+    };
+    clone_tree(
+        &src,
+        &s.path("dst"),
+        &Options {
+            on_entry: Some(&hook),
+            ..opts()
+        },
+    )
+    .unwrap();
+    let seen = untracked.into_inner().unwrap().unwrap();
+    assert!(
+        !seen.contains(clonedir::STAGE_PREFIX),
+        "stage visible to git status: {seen}"
+    );
+}
+
 // ------------------------------------------------------ physical allocation
 
 #[cfg(target_os = "macos")]
