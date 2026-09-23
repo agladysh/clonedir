@@ -84,7 +84,7 @@ The CLI SHALL remove its stage on failure and on SIGINT or SIGTERM, including st
 - **THEN** `git status` does not list it
 
 ### Requirement: Space Bound
-The CLI SHALL refuse to start, and stop, when available space on the destination filesystem is below `--min-free` (default 256 MiB), plus the bytes about to be copied when copying. It SHALL exit 5 and remove its stage.
+The CLI SHALL refuse to start, and stop, when available space on the destination filesystem is below `--min-free` (default 256 MiB), plus the bytes about to be copied when copying. It SHALL exit 5 and remove its stage. The floor is checked at start, every 256 entries and before each byte copy; it is not a reservation, so concurrent writers can still exhaust space between a check and a write, in which case the clone fails and removes its stage.
 
 #### Scenario: Floor above available space
 - **WHEN** `--min-free` exceeds available space
