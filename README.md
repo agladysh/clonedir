@@ -1,103 +1,85 @@
 # clonedir
 
-A command-line utility for cloning directories using copy-on-write where possible.
+Clone a directory tree using copy-on-write, correctly.
 
-## Description
+`clonedir SOURCE DESTINATION` creates `DESTINATION` as an independent copy of `SOURCE`. On APFS
+(and Linux filesystems with `FICLONE`) every regular file shares its extents with the source, so
+the copy costs metadata but no data blocks until one side is written.
 
-`clonedir` is a Rust-based CLI tool that wraps the `clonedir_lib` library to provide an efficient way to clone directories. It leverages copy-on-write mechanisms on supported filesystems to minimize disk usage and improve performance.
+## Semantics
 
-## Features
+- **Faithful.** Directories, files and symlinks keep their relative paths, modes and modification
+  times. Symlinks are recreated verbatim and never followed. Hard-linked files become independent
+  files. FIFOs, sockets, devices and nested mount points are refused.
+- **No silent copies.** When cloning is impossible (another volume, a filesystem without clones)
+  the command fails with exit status 4. `--allow-copy` permits byte copying, and the receipt counts
+  the bytes.
+- **Never overwrites.** The destination must not exist. The copy is built in a private stage beside
+  it and published by an exclusive rename, so the destination appears only complete, and only one
+  of several racing clones can win.
+- **Consistent or refused.** If the source changes while it is being cloned, the copy is discarded
+  (exit 3). Stop its writers and retry.
+- **Cleans up after itself.** Failures, SIGINT and SIGTERM remove the stage. A stage left by a
+  killed run records its pid. `clonedir --sweep PARENT`, or the next clone into that parent,
+  removes it once that process is gone.
+- **Bounded.** It refuses to proceed below `--min-free` available space (default 256 MiB).
 
-- **Copy-on-Write Cloning**: Uses filesystem-level copy-on-write for efficient directory cloning
-- **Cross-Platform**: Works on Linux, macOS, and Windows
-- **Verbose Output**: Optional detailed progress reporting
-- **Dry Run Mode**: Preview operations without making changes
-- **Force Overwrite**: Skip confirmation prompts for existing destinations
-- **Quiet Mode**: Suppress non-error output
-- **Robust Error Handling**: User-friendly error messages and proper exit codes
+## What copy-on-write does not do
 
-## Installation
-
-### From Crates.io (when published)
-
-```bash
-cargo install clonedir
-```
-
-### Build from Source
-
-1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd clonedir
-   ```
-
-2. Build the project:
-   ```bash
-   cargo build --release
-   ```
-
-3. The binary will be available at `target/release/clonedir`
+Only the files `clonedir` clones share extents. Data written independently (a rebuilt artifact, a
+freshly compressed Git object, a second download) is not deduplicated. Deleting the source does not
+free space while a clone still holds its blocks; the clone simply becomes their sole owner. `du`
+counts shared extents once per file, so it overstates what deleting a clone would free.
+`clonedir --measure PATH` reports logical, `du`-allocated and APFS private (unshared) bytes
+separately.
 
 ## Usage
 
-### Basic Usage
+```
+clonedir [OPTIONS] SOURCE DESTINATION
+clonedir --sweep [--json] PARENT
+clonedir --measure [--json] PATH...
 
-Clone a directory from source to destination:
-
-```bash
-clonedir /path/to/source /path/to/destination
+  -v, --verbose        Report what was done
+  -n, --dry-run        Check the inputs and report the plan without creating anything
+  -q, --quiet          Suppress non-error output (overrides --verbose)
+      --json           Print a JSON receipt (or error) on stdout
+      --allow-copy     Copy bytes where cloning is impossible
+      --min-free SIZE  Refuse to proceed below SIZE available (default 256M; K/M/G suffixes)
+      --keep-failed    Keep a failed stage for inspection instead of removing it
 ```
 
-### Options
+Exit status: 0 success, 1 error, 2 usage, 3 source changed, 4 cannot clone without
+`--allow-copy`, 5 insufficient space, 6 destination exists, 130 interrupted.
 
-- `-v, --verbose`: Enable verbose output showing progress
-- `-n, --dry-run`: Perform a dry run without making changes
-- `-f, --force`: Force overwrite without confirmation
-- `-q, --quiet`: Suppress non-error output
+A successful `--json` run prints one object:
 
-### Examples
-
-Clone with verbose output:
-```bash
-clonedir -v /src/dir /dst/dir
+```json
+{"ok":true,"source":"/abs/src","destination":"/abs/dst","filesystem":"apfs","directories":6,
+ "regular_files":40,"symlinks":1,"cloned_files":40,"copied_files":0,"logical_bytes":307,
+ "copied_bytes":0,"hardlinked_files":0,"swept_stages":[],"available_before":…,"available_after":…}
 ```
 
-Dry run to preview:
-```bash
-clonedir -n /src/dir /dst/dir
+A failure prints `{"ok":false,"error":{"kind":"SourceChanged","path":…,"message":…,"kept_stage":null}}`.
+
+## Library
+
+```rust
+let receipt = clonedir::clone_tree(src, dst, &clonedir::Options::default())?;
+let usage = clonedir::measure(dst)?; // logical, allocated, private bytes
 ```
 
-Force overwrite existing destination:
-```bash
-clonedir -f /src/dir /dst/dir
-```
+`Options` carries the fallback, the space floor, a cancellation flag, a per-entry hook and whether
+to keep a failed stage. The crate has no dependencies.
 
-Quiet mode (no output except errors):
-```bash
-clonedir -q /src/dir /dst/dir
-```
-
-## Building
-
-To build the project:
+## Building and testing
 
 ```bash
 cargo build --release
-```
-
-## Testing
-
-Run the test suite:
-
-```bash
-cargo test
+cargo test        # small fixtures; the physical-allocation tests run on APFS
+cargo install --path .
 ```
 
 ## License
 
-This project is licensed under the terms specified in the LICENSE file.
-
-## Contributing
-
-Contributions are welcome! Please see the project's contribution guidelines.
+MIT; see LICENSE.
