@@ -1,11 +1,10 @@
 # Project Context
 
 ## Purpose
-Create a command-line utility that wraps the clonedir_lib Rust library to provide an easy-to-use interface for cloning directories.
+Provide a library and command-line utility that clone directory trees with copy-on-write, with explicit fallback, atomic publication and owned cleanup.
 
 ## Tech Stack
-- Rust
-- clonedir_lib crate
+- Rust, no crate dependencies (platform calls declared in `src/sys.rs`)
 
 ## Project Conventions
 
@@ -15,8 +14,8 @@ Create a command-line utility that wraps the clonedir_lib Rust library to provid
 - Snake_case for functions and variables, PascalCase for types
 
 ### Architecture Patterns
-- CLI application using clap for argument parsing
-- Library wrapper pattern
+- Library (`src/lib.rs`) with the CLI (`src/main.rs`) as its first consumer
+- Dependency-free argument parsing
 
 ### Testing Strategy
 - Unit tests for core functionality
@@ -32,9 +31,8 @@ Create a command-line utility that wraps the clonedir_lib Rust library to provid
 File system operations, directory cloning utilities.
 
 ## Important Constraints
-- Must wrap existing clonedir_lib API
-- Cross-platform compatibility
+- macOS (APFS `clonefile`) and Linux (`FICLONE`); no silent byte copies
+- A destination is never overwritten or merged into
 
 ## External Dependencies
-- clonedir_lib
-- clap (for CLI)
+- None
