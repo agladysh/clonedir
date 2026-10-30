@@ -21,5 +21,5 @@
 - [x] 4.2 `cargo test` passes (38 tests, macOS APFS)
 
 ## 5. Validate and Archive
-- [ ] 5.1 `openspec validate correct-cow-tree-clone --strict` (openspec CLI not installed where this was prepared)
+- [x] 5.1 `openspec validate correct-cow-tree-clone --strict`
 - [ ] 5.2 Archive after installation and adopter update

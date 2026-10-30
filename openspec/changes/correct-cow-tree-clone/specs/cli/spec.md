@@ -114,6 +114,10 @@ The CLI SHALL handle errors gracefully, displaying user-friendly messages to std
 - **WHEN** a source entry cannot be read or the destination parent cannot be written
 - **THEN** displays "Error: Permission denied: PATH" and exits with code 1
 
+#### Scenario: Library error mapping
+- **WHEN** clonedir_lib fails with a mappable error
+- **THEN** displays a specific message naming the error and its path (e.g., "Error: Permission denied: PATH") instead of a generic lib error, and exits with that error's documented status
+
 #### Scenario: Usage error
 - **WHEN** an unknown option or the removed `--force` is given
 - **THEN** explains the problem and exits with code 2
@@ -124,6 +128,14 @@ The CLI SHALL validate its inputs before creating anything. The source must exis
 #### Scenario: Source validation
 - **WHEN** source is provided
 - **THEN** verifies it exists and is a directory
+
+#### Scenario: Destination validation
+- **WHEN** destination is provided
+- **THEN** checks its parent exists (else exits with code 1) and that it does not exist (else exits with code 6), before creating anything
+
+#### Scenario: Permission check failure
+- **WHEN** destination parent lacks write permissions
+- **THEN** displays "Error: Permission denied: PATH", exits with code 1, and leaves neither a destination nor a stage
 
 #### Scenario: Destination inside source
 - **WHEN** the destination lies inside the source, including through an aliased path such as an APFS firmlink
@@ -142,6 +154,10 @@ The CLI SHALL support a --quiet (-q) flag to suppress non-error output to stdout
 #### Scenario: Quiet dry run
 - **WHEN** --quiet or -q and --dry-run are used
 - **THEN** no output to stdout
+
+#### Scenario: Quiet with prompt
+- **WHEN** --quiet and destination exists
+- **THEN** exits with code 6 without prompting, and the existing destination is unchanged
 
 #### Scenario: Quiet overrides verbose
 - **WHEN** --quiet and --verbose are both used
