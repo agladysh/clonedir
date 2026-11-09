@@ -74,6 +74,7 @@ mod imp {
 
     const CLONE_NOFOLLOW: u32 = 0x0001;
     const CLONE_NOOWNERCOPY: u32 = 0x0002;
+    const CLONE_ACL: u32 = 0x0004;
     const RENAME_EXCL: u32 = 0x0000_0004;
 
     const ATTR_BIT_MAP_COUNT: u16 = 5;
@@ -113,7 +114,13 @@ mod imp {
     /// never copying ownership. Fails if `dst` exists.
     pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
         let (s, d) = (cstr(src)?, cstr(dst)?);
-        check(unsafe { clonefile(s.as_ptr(), d.as_ptr(), CLONE_NOFOLLOW | CLONE_NOOWNERCOPY) })
+        check(unsafe {
+            clonefile(
+                s.as_ptr(),
+                d.as_ptr(),
+                CLONE_NOFOLLOW | CLONE_NOOWNERCOPY | CLONE_ACL,
+            )
+        })
     }
 
     /// rename(2) that fails with EEXIST instead of replacing `to`, including an

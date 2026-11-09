@@ -705,3 +705,73 @@ mod physical {
         panic!("cloning 16 MiB consumed {observed:?} bytes of free space in every attempt");
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cloned_files_preserve_native_acls_and_independent_writes() {
+    use std::ffi::{CStr, CString, c_char, c_int, c_void};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn acl_text(path: &Path) -> Option<Vec<u8>> {
+        unsafe extern "C" {
+            fn acl_get_file(path: *const c_char, kind: c_int) -> *mut c_void;
+            fn acl_to_text(acl: *mut c_void, len: *mut isize) -> *mut c_char;
+            fn acl_free(value: *mut c_void) -> c_int;
+        }
+        const ACL_TYPE_EXTENDED: c_int = 0x100;
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            let acl = acl_get_file(path.as_ptr(), ACL_TYPE_EXTENDED);
+            if acl.is_null() {
+                return None;
+            }
+            let text = acl_to_text(acl, std::ptr::null_mut());
+            assert!(!text.is_null(), "format native ACL");
+            let bytes = CStr::from_ptr(text).to_bytes().to_vec();
+            assert_eq!(acl_free(text.cast()), 0);
+            assert_eq!(acl_free(acl), 0);
+            Some(bytes)
+        }
+    }
+
+    let s = Scratch::new("native-file-acl");
+    let src = s.path("src");
+    let source = src.join("file");
+    write(&source, b"original file bytes");
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "everyone allow read,readattr,readextattr,readsecurity"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let source_acl = acl_text(&source).expect("fixture source native ACL");
+    assert!(String::from_utf8_lossy(&source_acl).contains("everyone"));
+    let before = fs::metadata(&source).unwrap();
+    let receipt = clone_tree(&src, &s.path("dst"), &opts()).unwrap();
+    let destination = s.path("dst/file");
+    let after = fs::metadata(&destination).unwrap();
+    assert_eq!(acl_text(&destination), Some(source_acl.clone()));
+    assert_eq!(acl_text(&source), Some(source_acl), "source ACL unchanged");
+    assert_eq!(after.mode(), before.mode());
+    assert_eq!(
+        (after.mtime(), after.mtime_nsec()),
+        (before.mtime(), before.mtime_nsec())
+    );
+    assert_eq!(fs::read(&destination).unwrap(), b"original file bytes");
+    assert_eq!((receipt.cloned_files, receipt.copied_files), (1, 0));
+    fs::write(&destination, b"destination independent write").unwrap();
+    assert_eq!(fs::read(&source).unwrap(), b"original file bytes");
+    fs::write(&source, b"source independent write").unwrap();
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"destination independent write"
+    );
+}
